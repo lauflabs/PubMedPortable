@@ -9,11 +9,10 @@
     into the pubmed PostgreSQL database schema (defined in PubMedDB.py).
 """
 
-import sys, os
+import os
 import xml.etree.cElementTree as etree
-import datetime, time
+import datetime
 import warnings
-import logging
 import time
 
 import PubMedDB
@@ -93,8 +92,17 @@ class MedlineParser:
                     DBCitation.pmid = pubmed_id
 
                     try:
-                        same_pmid = self.session.query(PubMedDB.Citation).filter( PubMedDB.Citation.pmid == pubmed_id ).all()
-                        # The following condition is only for incremental updates. 
+                        # TODO don't waste time with this query, collect timing stats
+                        # TODO Loads all the matches, rather than doing a simple COUNT(1) !!! IS there an index event?
+                        print "Processing citation [%s]" % pubmed_id
+
+                        # same_pmid = self.session.query(PubMedDB.Citation).filter( PubMedDB.Citation.pmid == pubmed_id ).all()
+
+                        same_pmid = self.session\
+                            .query(PubMedDB.Citation.pmid)\
+                            .filter(PubMedDB.Citation.pmid == pubmed_id)\
+                            .first()
+                        # The following condition is only for incremental updates.
 
                         """
                         # Implementation that replaces the database entry with the new article from the XML file.
@@ -113,7 +121,10 @@ class MedlineParser:
                         # Manually deleting entries is possible (with PGAdmin3 or via command-line), e.g.:
                         # DELETE FROM pubmed.tbl_medline_citation WHERE pmid = 25005691;
                         if same_pmid:
-                            print "Article already in database - " + str(same_pmid[0]) + "Continuing with next PubMed-ID"
+                            conflicting_pmid = str(same_pmid[0])
+                            print "Article already in database - [%s] Continuing with next PubMed-ID" \
+                                  % (conflicting_pmid,)
+
                             DBCitation = PubMedDB.Citation()
                             DBJournal = PubMedDB.Journal()
                             elem.clear()
@@ -123,14 +134,15 @@ class MedlineParser:
                             DBCitation.xml_files = [DBXMLFile] # adds an implicit add()
                             self.session.add(DBCitation)
 
-                        if loop_counter % 1000 == 0:
+                        if loop_counter % 100 == 0:
                             self.session.commit()
 
                     except (IntegrityError) as error:
                         warnings.warn("\nIntegrityError: "+str(error), Warning)
                         self.session.rollback()
+
                     except Exception as e:
-                        warnings.warn("\nUnbekannter Fehler:"+str(e), Warning)
+                        warnings.warn("\nUnexpected Exception:"+str(e), Warning)
                         self.session.rollback()
                         raise
 
@@ -196,8 +208,8 @@ class MedlineParser:
                             DBJournal.pub_date_year = temp_year
                         except:
                             print _file, " not able to cast first 4 letters of medline_date ", temp_year
-                
-                
+
+
                 #if there is the attribute ArticleDate, month and day are given
                 if elem.tag == "ArticleDate":
                     DBJournal.pub_date_year = elem.find("Year").text
@@ -336,7 +348,7 @@ class MedlineParser:
                             if len(comment_ref_type) < 22:
                                 DBComment.ref_type = comment_ref_type
                             else:
-                                DBComment.ref_type = comment_ref_type[0:18] + "..."                            
+                                DBComment.ref_type = comment_ref_type[0:18] + "..."
                         comment_pmid_version = comment.find('PMID')
                         if comment_pmid_version != None:
                             DBComment.pmid_version = comment_pmid_version.text
@@ -506,18 +518,18 @@ class MedlineParser:
                                         temp_abstract_text += child_AbstractText.items()[0][1] + ":\n" + child_AbstractText.text + "\n"
                                 # label and NlmCategory - take label - first index has to be one:
                                 if len(child_AbstractText.items()) == 2:
-                                    temp_abstract_text += child_AbstractText.items()[1][1] + ":\n" + child_AbstractText.text + "\n"    
+                                    temp_abstract_text += child_AbstractText.items()[1][1] + ":\n" + child_AbstractText.text + "\n"
                     # if there is only one AbstractText-Tag ("usually") - no labels used:
                     if elem.find("AbstractText") != None and len(elem.findall("AbstractText")) == 1:
                         temp_abstract_text = elem.findtext("AbstractText")
                     # append abstract text for later pushing it into db:
                     DBAbstract.abstract_text = temp_abstract_text
                     # next 3 lines are unchanged - some abstract texts (few) contain the child-tag "CopyrightInformation" after all AbstractText-Tags:
-                    if elem.find("CopyrightInformation") != None:   
+                    if elem.find("CopyrightInformation") != None:
                         DBAbstract.copyright_information = elem.find("CopyrightInformation").text
                     DBCitation.abstracts.append(DBAbstract)
                 # end Kersten - code changed
-                
+
                 """
                 #old code:
                 if elem.tag == "Abstract":
@@ -600,8 +612,9 @@ def run(medline_path, clean, start, end, PROCESSES):
         end = int(end)
 
     if clean:
+        # TODO cascade drop/clean/create tables
         PubMedDB.create_tables(db)
-    
+
     PubMedDB.init(db)
 
     paths = []
@@ -611,16 +624,26 @@ def run(medline_path, clean, start, end, PROCESSES):
                 paths.append(os.path.join(root,filename))
 
     paths.sort()
-    
+
 
     pool = Pool(processes=PROCESSES)    # start with processors
     print "Initialized with ", PROCESSES, "processes"
     #result.get() needs global variable db now - that is why a line "db = options.database" is added in "__main__" - the variable db cannot be given to __start_parser in map_async()
-    result = pool.map_async(_start_parser, paths[start:end])
-    res = result.get()
-    #without multiprocessing:
-    #for path in paths:
-    #    _start_parser(path)
+
+    if PROCESSES > 1:
+        print "Running with Multi-Processing!"
+        result = pool.map_async(_start_parser, paths[start:end])
+        res = result.get()
+
+    # without multiprocessing:
+    else:
+        print "Running single threaded!"
+        src_file_counter = 0
+        total_src_files = len(paths)
+        for path in paths:
+            src_file_counter += 1
+            print "Processing file [%d/%d]" % (src_file_counter, total_src_files)
+            _start_parser(path)
 
     print "######################"
     print "###### Finished ######"
@@ -655,7 +678,7 @@ if __name__ == "__main__":
     #log start time of programme:
     start = time.asctime()
     run(options.medline_path, options.clean, int(options.start), options.end, int(options.PROCESSES))
-    #end time programme 
+    #end time programme
     end = time.asctime()
 
     print "programme started - " + start
