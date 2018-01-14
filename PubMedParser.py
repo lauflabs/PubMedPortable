@@ -33,24 +33,64 @@ warnings.simplefilter(WARNING_LEVEL)
 #convert 3 letter code of months to digits for unique publication format
 month_code = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06","Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
 
-class MedlineParser:
-    #db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
-    def __init__(self, filepath,db):
-        engine, Base = PubMedDB.init(db)
+
+class FilePreloadScreener:
+    # db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
+    def __init__(self, filepath, db_input):
+        # TODO move to shared code
+        engine, Base = PubMedDB.init(db_input)
         Session = sessionmaker(bind=engine)
         self.filepath = filepath
         self.session = Session()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.session.close()
+
+    @staticmethod
+    def _trim_to_invariant_path(path):
+        # Suffix insensitive file name (allow loading with either XML or XML.GZ source)
+        return os.path.split(path)[-1]
+
+    def exclude_loaded_files(self, paths):
+        parsed_files = self.session \
+            .query(PubMedDB.XMLFile.xml_file_name) \
+            .all()
+
+        parsed_files_set = set([str(item[0]) for item in parsed_files])
+
+        # Don't load the same file twice - find files still requiring parsing
+        unloaded_paths = [p for p in paths if self._trim_to_invariant_path(p) not in parsed_files_set]
+
+        # Tell folks what we're skipping
+        for p in paths:
+            if p not in unloaded_paths:
+                print 'Skipping, file %s already in DB' % (p,)
+
+        print 'Skipping %s files, Parsing %d files' % (len(paths)-len(unloaded_paths), len(unloaded_paths))
+
+        return unloaded_paths
+
+
+class MedlineParser:
+
+    # db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
+    def __init__(self, filepath, db_input):
+        engine, Base = PubMedDB.init(db_input)
+        Session = sessionmaker(bind=engine)
+        self.filepath = filepath
+        self.session = Session()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.session.close()
 
     def _parse(self):
         _file = self.filepath
-
-        """
-        a = self.session.query(PubMedDB.XMLFile.xml_file_name).filter_by(xml_file_name = os.path.split(self.filepath)[-1])
-        if a.all():
-            print self.filepath, 'already in DB'
-            return True
-        """
 
         if os.path.splitext(_file)[-1] == ".gz":
             _file = gzip.open(_file, 'rb')
@@ -93,7 +133,10 @@ class MedlineParser:
                     DBCitation.pmid = pubmed_id
 
                     try:
-                        same_pmid = self.session.query(PubMedDB.Citation).filter( PubMedDB.Citation.pmid == pubmed_id ).all()
+                        same_pmid = self.session\
+                            .query(PubMedDB.Citation.pmid)\
+                            .filter(PubMedDB.Citation.pmid == pubmed_id)\
+                            .first()
                         # The following condition is only for incremental updates. 
 
                         """
@@ -113,7 +156,7 @@ class MedlineParser:
                         # Manually deleting entries is possible (with PGAdmin3 or via command-line), e.g.:
                         # DELETE FROM pubmed.tbl_medline_citation WHERE pmid = 25005691;
                         if same_pmid:
-                            print "Article already in database - " + str(same_pmid[0]) + "Continuing with next PubMed-ID"
+                            print "Article already in database [%s] - Continuing with next PubMed-ID" % (str(same_pmid[0]),)
                             DBCitation = PubMedDB.Citation()
                             DBJournal = PubMedDB.Journal()
                             elem.clear()
@@ -123,14 +166,15 @@ class MedlineParser:
                             DBCitation.xml_files = [DBXMLFile] # adds an implicit add()
                             self.session.add(DBCitation)
 
-                        if loop_counter % 1000 == 0:
+                        if loop_counter % 100 == 0:
                             self.session.commit()
 
                     except (IntegrityError) as error:
                         warnings.warn("\nIntegrityError: "+str(error), Warning)
                         self.session.rollback()
+
                     except Exception as e:
-                        warnings.warn("\nUnbekannter Fehler:"+str(e), Warning)
+                        warnings.warn("\nUnknown Error: "+str(e), Warning)
                         self.session.rollback()
                         raise
 
@@ -588,8 +632,9 @@ def _start_parser(path):
         Used to start MultiProcessor Parsing
     """
     print path, '\tpid:', os.getpid()
-    p = MedlineParser(path,db)
-    s = p._parse()
+    with MedlineParser(path, db) as p:
+        p._parse()
+
     return path
 
 #uses global variable "db" because of result.get()
@@ -608,19 +653,32 @@ def run(medline_path, clean, start, end, PROCESSES):
     for root, dirs, files in os.walk(medline_path):
         for filename in files:
             if os.path.splitext(filename)[-1] in [".xml", ".gz"]:
-                paths.append(os.path.join(root,filename))
+                paths.append(os.path.join(root, filename))
+
+    # Don't reload what we've already got
+    with FilePreloadScreener(paths, db) as screener:
+        paths = screener.exclude_loaded_files(paths)
 
     paths.sort()
-    
 
-    pool = Pool(processes=PROCESSES)    # start with processors
+    pool = Pool(processes=PROCESSES)  # start with processors
     print "Initialized with ", PROCESSES, "processes"
-    #result.get() needs global variable db now - that is why a line "db = options.database" is added in "__main__" - the variable db cannot be given to __start_parser in map_async()
-    result = pool.map_async(_start_parser, paths[start:end])
-    res = result.get()
-    #without multiprocessing:
-    #for path in paths:
-    #    _start_parser(path)
+
+    # result.get() needs global variable `db` now - that is why a line "db = options.database" is added in "__main__" -
+    #  the variable db cannot be given to __start_parser in map_async()
+
+    print "Running for %d files" % (len(paths),)
+
+    if PROCESSES > 1 and len(paths) > 1:
+        print "Running multi-process with %d processes" % (PROCESSES,)
+        result = pool.map_async(_start_parser, paths[start:end])
+        res = result.get()
+
+    # without multiprocessing:
+    else:
+        print "Running single process"
+        for path in paths:
+            _start_parser(path)
 
     print "######################"
     print "###### Finished ######"
