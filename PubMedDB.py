@@ -74,7 +74,7 @@ class Citation(Base):
         CheckConstraint("article_author_list_comp_yn IN ('Y', 'N', 'y', 'n')", name='ck4_medline_citation'),
         CheckConstraint("data_bank_list_complete_yn IN ('Y', 'N', 'y', 'n')", name='ck5_medline_citation'),
         CheckConstraint("grant_list_complete_yn IN ('Y', 'N', 'y', 'n')", name='ck6_medline_citation'),
-        {'schema': SCHEMA} 
+        {'schema': SCHEMA}
     )
 
 
@@ -97,7 +97,7 @@ class PMID_File_Mapping(Base):
         ForeignKeyConstraint(['id_file','xml_file_name'], [SCHEMA+'.tbl_xml_file.id',SCHEMA+'.tbl_xml_file.xml_file_name'], onupdate="CASCADE", ondelete="CASCADE", name='fk3_pmids_in_file'),
         ForeignKeyConstraint(['fk_pmid'], [SCHEMA+'.tbl_medline_citation.pmid'], onupdate="CASCADE", ondelete="CASCADE", name="fk2_pmids_in_file"),
         PrimaryKeyConstraint( 'fk_pmid'),
-        {'schema': SCHEMA} 
+        {'schema': SCHEMA}
     )
 
 
@@ -125,7 +125,7 @@ class XMLFile(Base):
 
     __table_args__  = (
         PrimaryKeyConstraint('id','xml_file_name'),
-        {'schema': SCHEMA} 
+        {'schema': SCHEMA}
     )
 
 
@@ -715,26 +715,28 @@ class SupplMeshName(Base):
 #    session.commit()
 #    session.close()
 
+
 def init(db):
     """
         initialize the database and return the db_engine and the Base-Class for further usage
         an already existing DB want be overridden, you still get the handle (engine) to the DB
     """
-    con = 'postgresql://parser:parser@localhost/'+db
-    engine = create_engine(con)
-    Base.metadata.create_all(engine)
+    connection_string = 'postgresql://parser:parser@localhost/%s' % (db,)
 
-    return engine, Base
+    # Postgres default is max 100 connections
+    new_engine = create_engine(connection_string, pool_size=20, max_overflow=10)
+    Base.metadata.create_all(new_engine)
 
-def create_tables(db):
+    return new_engine, Base
+
+
+def create_tables(db_engine):
     """
         reset the whole DB
     """
-    con = 'postgresql://parser:parser@localhost/'+db
-    engine, Base = init(db)
     try:
-        Base.metadata.drop_all(engine)
-        Base.metadata.create_all(engine)
+        Base.metadata.drop_all(db_engine)
+        Base.metadata.create_all(db_engine)
 
     except:
         print "Can't create table"

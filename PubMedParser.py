@@ -11,7 +11,7 @@
 
 import sys, os
 import xml.etree.cElementTree as etree
-import datetime, time
+import datetime
 import warnings
 import logging
 import time
@@ -24,22 +24,20 @@ import gzip
 from multiprocessing import Pool
 
 
-WARNING_LEVEL = "always" #error, ignore, always, default, module, once
+WARNING_LEVEL = "always"  # error, ignore, always, default, module, once
 # multiple processes, #processors-1 is optimal!
 PROCESSES = 4
 
 warnings.simplefilter(WARNING_LEVEL)
 
-#convert 3 letter code of months to digits for unique publication format
-month_code = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06","Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
+# convert 3 letter code of months to digits for unique publication format
+month_code = {"Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+              "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12"}
 
 
 class FilePreloadScreener:
-    # db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
-    def __init__(self, filepath, db_input):
-        # TODO move to shared code
-        engine, Base = PubMedDB.init(db_input)
-        Session = sessionmaker(bind=engine)
+    def __init__(self, filepath, engine_input):
+        Session = sessionmaker(bind=engine_input)
         self.filepath = filepath
         self.session = Session()
 
@@ -47,7 +45,10 @@ class FilePreloadScreener:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.session.flush()
         self.session.close()
+        # TODO don't just close the session, close the CONNECTION!
+        # TODO docs say this should release connection resources, why isn't it?
 
     @staticmethod
     def _trim_to_invariant_path(path):
@@ -77,9 +78,8 @@ class FilePreloadScreener:
 class MedlineParser:
 
     # db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
-    def __init__(self, filepath, db_input):
-        engine, Base = PubMedDB.init(db_input)
-        Session = sessionmaker(bind=engine)
+    def __init__(self, filepath, engine_input):
+        Session = sessionmaker(bind=engine_input)
         self.filepath = filepath
         self.session = Session()
 
@@ -87,6 +87,7 @@ class MedlineParser:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.session.flush()
         self.session.close()
 
     @staticmethod
@@ -479,24 +480,25 @@ class MedlineParser:
                         DBCitation.databanks.append(DBDataBank)
 
                         acc_numbers = databank.find("AccessionNumberList")
-                        if acc_numbers != None:
+                        if acc_numbers is not None:
                             for acc_number in acc_numbers:
-                                DBAccession = PubMedDB.Accession()
-                                DBAccession.data_bank_name = DBDataBank.data_bank_name
-                                DBAccession.accession_number = acc_number.text
-                                DBCitation.accessions.append(DBAccession)
+                                db_accession = PubMedDB.Accession()
+                                db_accession.data_bank_name = DBDataBank.data_bank_name
+                                db_accession.accession_number = acc_number.text
+                                DBCitation.accessions.append(db_accession)
 
                 if elem.tag == "Language":
-                    DBLanguage = PubMedDB.Language()
-                    DBLanguage.language = elem.text
-                    DBCitation.languages = [DBLanguage]
+                    db_language = PubMedDB.Language()
+                    db_language.language = elem.text
+                    DBCitation.languages = [db_language]
 
+                # TODO many PKEY hits on this, do a check before saving, so we don't lose the article
                 if elem.tag == "PublicationTypeList":
                     DBCitation.publication_types = []
                     for subelem in elem:
-                        DBPublicationType = PubMedDB.PublicationType()
-                        DBPublicationType.publication_type = subelem.text
-                        DBCitation.publication_types.append(DBPublicationType)
+                        db_publication_type = PubMedDB.PublicationType()
+                        db_publication_type.publication_type = subelem.text
+                        DBCitation.publication_types.append(db_publication_type)
 
                 if elem.tag == "Article":
                     #ToDo
@@ -639,27 +641,27 @@ def get_memory_usage(pid=os.getpid(), format="%mem"):
                         (pid, format)).read().strip())
 
 
-def _start_parser(path):
+def _start_parser(path, engine_input):
     """
         Used to start MultiProcessor Parsing
     """
     print path, '\tpid:', os.getpid()
-    with MedlineParser(path, db) as p:
+    with MedlineParser(path, engine_input) as p:
         p._parse()
 
     return path
 
-# uses global variable "db" because of result.get()
-def run(medline_path, clean, start, end, PROCESSES):
-    con = 'postgresql://parser:parser@localhost/'+db
 
+# uses global variable "db" because of result.get()
+def run(db_name_input, medline_path, clean, start, end, PROCESSES):
     if end is not None:
         end = int(end)
 
+    # Only make a single database connection pool
+    db_engine, base = PubMedDB.init(db_name_input)
+
     if clean:
-        PubMedDB.create_tables(db)
-    
-    PubMedDB.init(db)
+        PubMedDB.create_tables(db_engine)
 
     paths = []
     for root, dirs, files in os.walk(medline_path):
@@ -668,29 +670,34 @@ def run(medline_path, clean, start, end, PROCESSES):
                 paths.append(os.path.join(root, filename))
 
     # Don't reload what we've already got
-    with FilePreloadScreener(paths, db) as screener:
+    with FilePreloadScreener(paths, db_engine) as screener:
         paths = screener.exclude_loaded_files(paths)
 
     paths.sort()
 
-    pool = Pool(processes=PROCESSES)  # start with processors
-    print "Initialized with ", PROCESSES, "processes"
+    print "Running for %d files" % (len(paths),)
 
     # result.get() needs global variable `db` now - that is why a line "db = options.database" is added in "__main__" -
     #  the variable db cannot be given to __start_parser in map_async()
 
-    print "Running for %d files" % (len(paths),)
-
     if PROCESSES > 1 and len(paths) > 1:
-        print "Running multi-process with %d processes" % (PROCESSES,)
-        result = pool.map_async(_start_parser, paths[start:end])
-        res = result.get()
+
+        from functools import partial
+
+        with Pool(processes=PROCESSES) as pool:
+            print "Running multi-process with %d processes" % (PROCESSES,)
+            result = pool.map_async(
+                partial(_start_parser, db_engine=db_engine),
+                paths[start:end]
+            )
+
+            res = result.get()
 
     # without multiprocessing:
     else:
         print "Running single process"
         for path in paths:
-            _start_parser(path)
+            _start_parser(path, db_engine)
 
     print "######################"
     print "###### Finished ######"
@@ -721,10 +728,10 @@ if __name__ == "__main__":
                       help="What is the name of the database. (Default: pancreatic_cancer_db)")
 
     (options, args) = parser.parse_args()
-    db = options.database
+    db_name = options.database
     #log start time of programme:
     start = time.asctime()
-    run(options.medline_path, options.clean, int(options.start), options.end, int(options.PROCESSES))
+    run(db_name, options.medline_path, options.clean, int(options.start), options.end, int(options.PROCESSES))
     #end time programme 
     end = time.asctime()
 
