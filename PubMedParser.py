@@ -13,15 +13,13 @@ import sys, os
 import xml.etree.cElementTree as etree
 import datetime
 import warnings
-import logging
 import time
 
 import PubMedDB
 from sqlalchemy.orm import *
-from sqlalchemy import *
 from sqlalchemy.exc import *
 import gzip
-from multiprocessing import Pool, Value
+from multiprocessing import Pool
 
 
 WARNING_LEVEL = "always"  # error, ignore, always, default, module, once
@@ -47,8 +45,6 @@ class FilePreloadScreener:
     def __exit__(self, exc_type, exc_value, traceback):
         self.session.flush()
         self.session.close()
-        # TODO don't just close the session, close the CONNECTION!
-        # TODO docs say this should release connection resources, why isn't it?
 
     @staticmethod
     def _trim_to_invariant_path(path):
@@ -738,7 +734,7 @@ if __name__ == "__main__":
                       help="All queued files are passed if no start and end parameter is set. Otherwise you can specify a start and end o the queue. For example to split the parsing on several machines.")
     parser.add_option("-i", "--input", dest="medline_path",
                       default='data/pancreatic_cancer/',
-                      help="specify the path to the medine XML-Files (default: data/pancreatic_cancer/)")
+                      help="specify the path to the medline XML-Files (default: data/pancreatic_cancer/)")
     parser.add_option("-p", "--processes",
                       dest="PROCESSES", default=2,
                       help="How many processes should be used. (Default: 2)")
