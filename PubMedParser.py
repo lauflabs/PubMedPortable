@@ -21,7 +21,7 @@ from sqlalchemy.orm import *
 from sqlalchemy import *
 from sqlalchemy.exc import *
 import gzip
-from multiprocessing import Pool
+from multiprocessing import Pool, Value
 
 
 WARNING_LEVEL = "always"  # error, ignore, always, default, module, once
@@ -78,10 +78,14 @@ class FilePreloadScreener:
 class MedlineParser:
 
     # db is a global variable and given to MedlineParser(path,db) in _start_parser(path)
-    def __init__(self, filepath, engine_input):
-        Session = sessionmaker(bind=engine_input)
+    def __init__(self, filepath, db_name_input='pubmed'):  # TODO make way to pass db name as well
+        db_engine, base = PubMedDB.init(db_name_input)
+
         self.filepath = filepath
-        self.session = Session()
+        self.connection = db_engine.connect()
+
+        Session = sessionmaker(bind=db_engine)
+        self.session = Session(bind=self.connection)
 
     def __enter__(self):
         return self
@@ -89,6 +93,7 @@ class MedlineParser:
     def __exit__(self, exc_type, exc_value, traceback):
         self.session.flush()
         self.session.close()
+        self.connection.close()
 
     @staticmethod
     def _limited_string(input_str, limit):
@@ -121,10 +126,9 @@ class MedlineParser:
         DBCitation = PubMedDB.Citation()
         db_journal = PubMedDB.Journal()
 
-
-        DBXMLFile = PubMedDB.XMLFile()
-        DBXMLFile.xml_file_name = os.path.split(self.filepath)[-1]
-        DBXMLFile.time_processed = datetime.datetime.now()#time.localtime()
+        db_xml_file = PubMedDB.XMLFile()
+        db_xml_file.xml_file_name = os.path.split(self.filepath)[-1]
+        db_xml_file.time_processed = datetime.datetime.now()  # time.localtime()
 
         loop_counter = 0  # to check for memory usage each X loops
 
@@ -180,7 +184,7 @@ class MedlineParser:
                             self.session.commit()
                             continue
                         else:
-                            DBCitation.xml_files = [DBXMLFile]  # adds an implicit add()
+                            DBCitation.xml_files = [db_xml_file]  # adds an implicit add()
                             self.session.add(DBCitation)
 
                         # if loop_counter % 100 == 0:
@@ -229,8 +233,11 @@ class MedlineParser:
                     db_journal.issn_type = elem.attrib['IssnType']
 
                 if elem.tag == "JournalIssue" or elem.tag == "Book":
-                    if elem.find("Volume") != None:         db_journal.volume = elem.find("Volume").text
-                    if elem.find("Issue") != None:          db_journal.issue = elem.find("Issue").text
+
+                    if elem.find("Volume") is not None:
+                        db_journal.volume = elem.find("Volume").text
+                    if elem.find("Issue") is not None:
+                        db_journal.issue = elem.find("Issue").text
 
                     # ensure pub_date_year with boolean year:
                     year = False
@@ -254,9 +261,8 @@ class MedlineParser:
                             db_journal.pub_date_year = temp_year
                         except:
                             print _file, " not able to cast first 4 letters of medline_date ", temp_year
-                
-                
-                #if there is the attribute ArticleDate, month and day are given
+
+                # if there is the attribute ArticleDate, month and day are given
                 if elem.tag == "ArticleDate":
                     db_journal.pub_date_year = elem.find("Year").text
                     db_journal.pub_date_month = elem.find("Month").text
@@ -267,9 +273,9 @@ class MedlineParser:
                     pass
 
                 if elem.tag == "Journal":
-                    if elem.find("Title") != None:
+                    if elem.find("Title") is not None:
                         db_journal.title = elem.find("Title").text
-                    if elem.find("ISOAbbreviation") != None:
+                    if elem.find("ISOAbbreviation") is not None:
                         db_journal.iso_abbreviation = elem.find("ISOAbbreviation").text
 
                 if elem.tag == "ArticleTitle" or elem.tag == "BookTitle":
@@ -278,7 +284,7 @@ class MedlineParser:
                     DBCitation.medline_pgn = elem.text
 
                 if elem.tag == "AuthorList":
-                    #catch KeyError in case there is no CompleteYN attribute before committing DBCitation
+                    # catch KeyError in case there is no CompleteYN attribute before committing DBCitation
                     try:
                         DBCitation.article_author_list_comp_yn = elem.attrib["CompleteYN"]
                     except:
@@ -390,10 +396,15 @@ class MedlineParser:
                     for comment in elem:
                         db_comment = PubMedDB.Comment()
 
-                        db_comment.ref_source = self._limited_string(comment.find('RefSource'), 255)
-                        db_comment.ref_type = self._limited_string(comment.attrib['RefType'], 22)
-
+                        comment_ref_type = comment.attrib['RefType']
+                        comment_ref_source = comment.find('RefSource')
                         comment_pmid_version = comment.find('PMID')
+
+                        if comment_ref_source is not None:
+                            db_comment.ref_source = self._limited_string(comment_ref_source.text, 255)
+
+                        if comment_ref_type is not None:
+                            db_comment.ref_type = self._limited_string(comment_ref_type, 22)
 
                         if comment_pmid_version is not None:
                             db_comment.pmid_version = comment_pmid_version.text
@@ -428,13 +439,13 @@ class MedlineParser:
                     DBCitation.meshheadings = []
                     DBCitation.qualifiers = []
                     for mesh in elem:
-                        DBMeSHHeading = PubMedDB.MeSHHeading()
+                        db_meSH_heading = PubMedDB.MeSHHeading()
                         mesh_desc = mesh.find("DescriptorName")
-                        if mesh_desc != None:
-                            DBMeSHHeading.descriptor_name = mesh_desc.text
-                            DBMeSHHeading.descriptor_name_major_yn = mesh_desc.attrib['MajorTopicYN']
-                            DBMeSHHeading.descriptor_ui = mesh_desc.attrib['UI']
-                        if mesh.find("QualifierName") != None:
+                        if mesh_desc is not None:
+                            db_meSH_heading.descriptor_name = mesh_desc.text
+                            db_meSH_heading.descriptor_name_major_yn = mesh_desc.attrib['MajorTopicYN']
+                            db_meSH_heading.descriptor_ui = mesh_desc.attrib['UI']
+                        if mesh.find("QualifierName") is not None:
                             mesh_quals = mesh.findall("QualifierName")
                             for qual in mesh_quals:
                                 DBQualifier = PubMedDB.Qualifier()
@@ -443,10 +454,10 @@ class MedlineParser:
                                 DBQualifier.qualifier_name_major_yn = qual.attrib['MajorTopicYN']
                                 DBQualifier.qualifier_ui = qual.attrib['UI']
                                 DBCitation.qualifiers.append(DBQualifier)
-                        DBCitation.meshheadings.append(DBMeSHHeading)
+                        DBCitation.meshheadings.append(db_meSH_heading)
 
                 if elem.tag == "GrantList":
-                    #catch KeyError in case there is no CompleteYN attribute before committing DBCitation
+                    # catch KeyError in case there is no CompleteYN attribute before committing DBCitation
                     try:
                         DBCitation.grant_list_complete_yn = elem.attrib["CompleteYN"]
                     except:
@@ -455,18 +466,18 @@ class MedlineParser:
                     for grant in elem:
                         DBGrants = PubMedDB.Grant()
 
-                        if grant.find("GrantID") != None:
+                        if grant.find("GrantID") is not None:
                             DBGrants.grantid = grant.find("GrantID").text
-                        if grant.find("Acronym") != None:
+                        if grant.find("Acronym") is not None:
                             DBGrants.acronym = grant.find("Acronym").text
-                        if grant.find("Agency") != None:
+                        if grant.find("Agency") is not None:
                             DBGrants.agency = grant.find("Agency").text
-                        if grant.find("Country") != None:
+                        if grant.find("Country") is not None:
                             DBGrants.country = grant.find("Country").text
                         DBCitation.grants.append(DBGrants)
 
                 if elem.tag == "DataBankList":
-                    #catch KeyError in case there is no CompleteYN attribute before committing DBCitation
+                    # catch KeyError in case there is no CompleteYN attribute before committing DBCitation
                     try:
                         DBCitation.data_bank_list_complete_yn = elem.attrib["CompleteYN"]
                     except:
@@ -475,15 +486,15 @@ class MedlineParser:
                     DBCitation.databanks = []
 
                     for databank in elem:
-                        DBDataBank = PubMedDB.DataBank()
-                        DBDataBank.data_bank_name = databank.find("DataBankName").text
-                        DBCitation.databanks.append(DBDataBank)
+                        db_data_bank = PubMedDB.DataBank()
+                        db_data_bank.data_bank_name = databank.find("DataBankName").text
+                        DBCitation.databanks.append(db_data_bank)
 
                         acc_numbers = databank.find("AccessionNumberList")
                         if acc_numbers is not None:
                             for acc_number in acc_numbers:
                                 db_accession = PubMedDB.Accession()
-                                db_accession.data_bank_name = DBDataBank.data_bank_name
+                                db_accession.data_bank_name = db_data_bank.data_bank_name
                                 db_accession.accession_number = acc_number.text
                                 DBCitation.accessions.append(db_accession)
 
@@ -542,20 +553,22 @@ class MedlineParser:
                 # check for different labels: "OBJECTIVE", "CASE SUMMARY", ...
                 # next 3 lines are unchanged
                 if elem.tag == "Abstract":
-                    DBAbstract = PubMedDB.Abstract()
+                    db_abstract = PubMedDB.Abstract()
                     DBCitation.abstracts = []
-                    #prepare empty string for "normal" abstracts or "labelled" abstracts
+                    # prepare empty string for "normal" abstracts or "labelled" abstracts
                     temp_abstract_text = ""
-                    #if there are multiple AbstractText-Tags:
-                    if elem.find("AbstractText") != None and len(elem.findall("AbstractText")) > 1:
+
+                    # if there are multiple AbstractText-Tags:
+                    if elem.find("AbstractText") is not None and len(elem.findall("AbstractText")) > 1:
+
                         for child_AbstractText in elem.getchildren():
                             # iteration over all labels is needed otherwise only "OBJECTIVE" would be pushed into database
                             # debug: check label
                             # [('NlmCategory', 'METHODS'), ('Label', 'CASE SUMMARY')]
                             # ...
                             # also checked for empty child-tags in this structure!
-                            if child_AbstractText.tag == "AbstractText" and child_AbstractText.text != None:
-                            #if child_AbstractText.tag == "AbstractText": # would give an error!
+                            if child_AbstractText.tag == "AbstractText" and child_AbstractText.text is not None:
+                                # if child_AbstractText.tag == "AbstractText": # would give an error!
                                 # no label - this case should not happen with multiple AbstractText-Tags:
                                 if len(child_AbstractText.items()) == 0:
                                     temp_abstract_text +=child_AbstractText.text + "\n"
@@ -570,14 +583,14 @@ class MedlineParser:
                                 if len(child_AbstractText.items()) == 2:
                                     temp_abstract_text += child_AbstractText.items()[1][1] + ":\n" + child_AbstractText.text + "\n"    
                     # if there is only one AbstractText-Tag ("usually") - no labels used:
-                    if elem.find("AbstractText") != None and len(elem.findall("AbstractText")) == 1:
+                    if elem.find("AbstractText") is not None and len(elem.findall("AbstractText")) == 1:
                         temp_abstract_text = elem.findtext("AbstractText")
                     # append abstract text for later pushing it into db:
-                    DBAbstract.abstract_text = temp_abstract_text
+                        db_abstract.abstract_text = temp_abstract_text
                     # next 3 lines are unchanged - some abstract texts (few) contain the child-tag "CopyrightInformation" after all AbstractText-Tags:
-                    if elem.find("CopyrightInformation") != None:   
-                        DBAbstract.copyright_information = elem.find("CopyrightInformation").text
-                    DBCitation.abstracts.append(DBAbstract)
+                    if elem.find("CopyrightInformation") is not None:
+                        db_abstract.copyright_information = elem.find("CopyrightInformation").text
+                    DBCitation.abstracts.append(db_abstract)
                 # end Kersten - code changed
                 
                 """
@@ -591,7 +604,7 @@ class MedlineParser:
                     DBCitation.abstracts.append(DBAbstract)
                 """
                 if elem.tag == "KeywordList":
-                    #catch KeyError in case there is no Owner attribute before committing DBCitation
+                    # catch KeyError in case there is no Owner attribute before committing DBCitation
                     try:
                         DBCitation.keyword_list_owner = elem.attrib["Owner"]
                     except:
@@ -599,14 +612,14 @@ class MedlineParser:
                     DBCitation.keywords = []
                     all_keywords = []
                     for subelem in elem:
-                        #some documents contain duplicate keywords which would lead to a key error - if-clause
+                        # some documents contain duplicate keywords which would lead to a key error - if-clause
                         if not subelem.text in all_keywords:
                             all_keywords.append(subelem.text)
                         else:
                             continue
                         DBKeyword = PubMedDB.Keyword()
                         DBKeyword.keyword = subelem.text
-                        #catch KeyError in case there is no MajorTopicYN attribute before committing DBCitation
+                        # catch KeyError in case there is no MajorTopicYN attribute before committing DBCitation
                         try:
                             DBKeyword.keyword_major_yn = subelem.attrib["MajorTopicYN"]
                         except:
@@ -631,77 +644,83 @@ class MedlineParser:
         return True
 
 
-def get_memory_usage(pid=os.getpid(), format="%mem"):
-    """
-        Get the Memory Usage from a specific process
-        @pid = Process ID
-        @format = % or kb (%mem or rss) ...
-    """
-    return float(os.popen('ps -p %d -o %s | tail -1' %
-                        (pid, format)).read().strip())
-
-
-def _start_parser(path, engine_input):
+def _start_parser(path):
     """
         Used to start MultiProcessor Parsing
     """
     print path, '\tpid:', os.getpid()
-    with MedlineParser(path, engine_input) as p:
+
+    # Funky locking because we're going multiprocess
+    with MedlineParser(path) as p:
         p._parse()
 
     return path
 
 
-# uses global variable "db" because of result.get()
-def run(db_name_input, medline_path, clean, start, end, PROCESSES):
-    if end is not None:
-        end = int(end)
+class ParserOrchestrator:
 
-    # Only make a single database connection pool
-    db_engine, base = PubMedDB.init(db_name_input)
+    def __init__(self, db_name_input):
+        # Only make a single database connection pool
+        db_engine, base = PubMedDB.init(db_name_input)
+        self.db_name = db_name_input
+        self.db_engine = db_engine
 
-    if clean:
-        PubMedDB.create_tables(db_engine)
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+        # TODO close any open db resources
 
-    paths = []
-    for root, dirs, files in os.walk(medline_path):
-        for filename in files:
-            if os.path.splitext(filename)[-1] in [".xml", ".gz"]:
-                paths.append(os.path.join(root, filename))
+    @staticmethod
+    def get_memory_usage(pid=os.getpid(), format="%mem"):
+        """
+            Get the Memory Usage from a specific process
+            @pid = Process ID
+            @format = % or kb (%mem or rss) ...
+        """
+        return float(os.popen('ps -p %d -o %s | tail -1' %
+                            (pid, format)).read().strip())
 
-    # Don't reload what we've already got
-    with FilePreloadScreener(paths, db_engine) as screener:
-        paths = screener.exclude_loaded_files(paths)
+    def run(self, medline_path, clean, start, end, PROCESSES):
+        if end is not None:
+            end = int(end)
 
-    paths.sort()
+        if clean:
+            PubMedDB.create_tables(self.db_engine)
 
-    print "Running for %d files" % (len(paths),)
+        paths = []
+        for root, dirs, files in os.walk(medline_path):
+            for filename in files:
+                if os.path.splitext(filename)[-1] in [".xml", ".gz"]:
+                    paths.append(os.path.join(root, filename))
 
-    # result.get() needs global variable `db` now - that is why a line "db = options.database" is added in "__main__" -
-    #  the variable db cannot be given to __start_parser in map_async()
+        # Don't reload what we've already got
+        with FilePreloadScreener(paths, self.db_engine) as screener:
+            paths = screener.exclude_loaded_files(paths)
 
-    if PROCESSES > 1 and len(paths) > 1:
+        paths.sort()
 
-        from functools import partial
+        print "Running for %d files" % (len(paths),)
 
-        with Pool(processes=PROCESSES) as pool:
-            print "Running multi-process with %d processes" % (PROCESSES,)
-            result = pool.map_async(
-                partial(_start_parser, db_engine=db_engine),
-                paths[start:end]
-            )
+        # result.get() needs global variable `db` now - that is why a line "db = options.database" is added in "__main__" -
+        #  the variable db cannot be given to __start_parser in map_async()
 
-            res = result.get()
+        if PROCESSES > 1 and len(paths) > 1:
 
-    # without multiprocessing:
-    else:
-        print "Running single process"
-        for path in paths:
-            _start_parser(path, db_engine)
+            from contextlib import closing
 
-    print "######################"
-    print "###### Finished ######"
-    print "######################"
+            with closing(Pool(processes=PROCESSES)) as pool:
+                print "Running multi-process with %d processes" % (PROCESSES,)
+                result = pool.map_async(_start_parser, paths[start:end])
+                res = result.get()
+
+        # without multiprocessing:
+        else:
+            print "Running single process"
+            for path in paths:
+                _start_parser(path)
+
+        print "######################"
+        print "###### Finished ######"
+        print "######################"
 
 
 if __name__ == "__main__":
@@ -729,10 +748,13 @@ if __name__ == "__main__":
 
     (options, args) = parser.parse_args()
     db_name = options.database
-    #log start time of programme:
+    # log start time of programme:
     start = time.asctime()
-    run(db_name, options.medline_path, options.clean, int(options.start), options.end, int(options.PROCESSES))
-    #end time programme 
+
+    orchestrator = ParserOrchestrator(db_name)
+    orchestrator.run(options.medline_path, options.clean, int(options.start), options.end, int(options.PROCESSES))
+
+    # end time programme
     end = time.asctime()
 
     print "programme started - " + start

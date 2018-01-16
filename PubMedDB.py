@@ -716,12 +716,12 @@ class SupplMeshName(Base):
 #    session.close()
 
 
-def init(db):
+def init(db_name):
     """
         initialize the database and return the db_engine and the Base-Class for further usage
         an already existing DB want be overridden, you still get the handle (engine) to the DB
     """
-    connection_string = 'postgresql://parser:parser@localhost/%s' % (db,)
+    connection_string = 'postgresql://parser:parser@localhost/%s' % (db_name,)
 
     # Postgres default is max 100 connections
     new_engine = create_engine(connection_string, pool_size=20, max_overflow=10)
