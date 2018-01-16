@@ -189,10 +189,13 @@ class MedlineParser:
                         self.session.commit()
 
                     except IntegrityError as error:
-                        warnings.warn("\nIntegrityError: %s, %s, %s" % (self.filepath, pubmed_id, str(error)), Warning)
+                        error_str = unicode(str(error).encode('string_escape')).encode('UTF-8')
+                        warnings.warn("\nIntegrityError: %s, %s, %s" % (self.filepath, pubmed_id, error_str), Warning)
                         self.session.rollback()
+
                     except Exception as error:
-                        warnings.warn("\nUnknownError: %s, %s, %s" % (self.filepath, pubmed_id, str(error)), Warning)
+                        error_str = unicode(str(error).encode('string_escape')).encode('UTF-8')  # TODO pullout to common (and above)
+                        warnings.warn("\nUnknownError: %s, %s, %s" % (self.filepath, pubmed_id, error_str), Warning)
                         self.session.rollback()
 
                     DBCitation = PubMedDB.Citation()
@@ -400,7 +403,7 @@ class MedlineParser:
                             db_comment.ref_source = self._limited_string(comment_ref_source.text, 255)
 
                         if comment_ref_type is not None:
-                            db_comment.ref_type = self._limited_string(comment_ref_type, 22)
+                            db_comment.ref_type = self._limited_string(comment_ref_type, 21)
 
                         if comment_pmid_version is not None:
                             db_comment.pmid_version = comment_pmid_version.text
@@ -428,7 +431,7 @@ class MedlineParser:
                 if elem.tag == "CitationSubset":
                     DBCitation.citation_subsets = []
                     for subelem in elem:
-                        DBCitationSubset = CitationSubset(subelem.text)
+                        DBCitationSubset = PubMedDB.CitationSubset(subelem.text)
                         DBCitation.citation_subsets.append(DBCitationSubset)
 
                 if elem.tag == "MeshHeadingList":
